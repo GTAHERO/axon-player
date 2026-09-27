@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<!--
+  Axon-style Digital Evidence player for rv_bodycam.
+  Upload this file to your website (e.g. GitHub Pages) and put its https URL
+  in PLAYER_PAGE_URL at the top of rv_bodycam/viewer_client.lua.
+  It is NOT listed in meta.xml: MTA remote browsers can't load local files, so
+  players load it from your site, not from the resource.
+
+  Data arrives as query parameters from Lua:
+    ?v=<video url>&name=<officer>&badge=<badge>&serial=<device>&case=<case id>&date=<ISO UTC>
+  Closing: navigates to ?action=close, which Lua watches for (remote pages
+  can't call mta.triggerEvent).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Axon Evidence Player</title>
+<style>
+  :root {
+    --bg: #0b0e13;
+    --panel: #121720;
+    --line: #232b38;
+    --text: #e6e9ef;
+    --muted: #8a94a6;
+    --accent: #ffcc00;
+    --rec: #e74c3c;
+    --mono: Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: transparent; /* browser is created transparent: only the rounded panel shows */
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--text);
+    user-select: none;
+  }
+  .app {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  /* header */
+  header {
+    height: 64px; flex: none;
+    display: flex; align-items: center; gap: 28px;
+    padding: 0 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: 3px; font-size: 18px; }
+  .brand svg { width: 28px; height: 28px; }
+  .brand small { display: block; font-size: 10px; letter-spacing: 2px; color: var(--muted); font-weight: 600; }
+  .meta { display: flex; gap: 28px; flex: 1; }
+  .meta div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .meta label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+  .meta span { font-size: 14px; font-weight: 600; font-family: var(--mono); white-space: nowrap; }
+  .close {
+    width: 34px; height: 34px; border-radius: 6px;
+    border: 1px solid var(--line); background: transparent;
+    color: var(--muted); font-size: 16px; cursor: pointer;
+  }
+  .close:hover { color: #fff; border-color: var(--rec); background: rgba(231, 76, 60, .15); }
+
+  /* video stage */
+  .stage { position: relative; flex: 1; background: #000; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; cursor: pointer; }
+  .watermark {
+    position: absolute; top: 14px; right: 16px;
+    font-family: var(--mono); font-size: 14px; letter-spacing: .5px;
+    color: #fff; text-shadow: 1px 1px 0 #000, 0 0 3px #000;
+    pointer-events: none;
+  }
+  .watermark b { color: var(--accent); font-weight: 700; }
+  .state {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    padding: 40px; text-align: center;
+    color: var(--muted); font-size: 14px; line-height: 1.5;
+    background: rgba(0, 0, 0, .35);
+    pointer-events: none;
+  }
+  .state.hidden { display: none; }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid var(--line); border-top-color: var(--accent);
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* controls (native video controls are disabled) */
+  .controls {
+    height: 58px; flex: none;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 18px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .btn {
+    width: 38px; height: 38px; flex: none; border-radius: 50%;
+    border: none; background: var(--accent); color: #111; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn svg { width: 16px; height: 16px; fill: currentColor; }
+  .time { font-family: var(--mono); font-size: 13px; color: var(--muted); min-width: 110px; }
+  input[type=range] {
+    flex: 1; height: 6px; border-radius: 3px; cursor: pointer;
+    -webkit-appearance: none; appearance: none; outline: none;
+    background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--line) var(--p, 0%));
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; box-shadow: 0 0 0 3px rgba(255, 204, 0, .35);
+  }
+  .tag { font-size: 11px; letter-spacing: 1.5px; color: var(--muted); white-space: nowrap; }
+  .tag i {
+    display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%;
+    background: var(--rec); animation: blink 1.2s ease-in-out infinite;
+  }
+  @keyframes blink { 50% { opacity: .25; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 3 30 28H2Z" fill="none" stroke="#ffcc00" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M16 13 22 24H10Z" fill="#ffcc00"/>
+      </svg>
+      <div>AXON<small>EVIDENCE</small></div>
+    </div>
+    <div class="meta">
+      <div><label>Case ID</label><span id="caseId">—</span></div>
+      <div><label>Officer</label><span id="officer">—</span></div>
+      <div><label>Badge ID</label><span id="badge">—</span></div>
+      <div><label>Opened (UTC)</label><span id="stamp">—</span></div>
+    </div>
+    <button class="close" id="close" title="Close (Esc)">&#10005;</button>
+  </header>
+
+  <div class="stage">
+    <video id="video" preload="auto" playsinline></video>
+    <div class="watermark"><b id="serial">AXON BODY 3 X81000000</b> | <span id="liveStamp">—</span></div>
+    <div class="state" id="state"><div class="spinner" id="spinner"></div><div id="stateText">Loading evidence…</div></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="play" title="Play / Pause (Space)">
+      <svg viewBox="0 0 16 16" id="icon"><path d="M4 2l10 6-10 6z"/></svg>
+    </button>
+    <div class="time"><span id="cur">00:00</span> / <span id="dur">00:00</span></div>
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Seek">
+    <div class="tag"><i></i>SECURE PLAYBACK</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var video = $("video"), seek = $("seek"), state = $("state");
+  var ICON_PLAY = '<path d="M4 2l10 6-10 6z"/>';
+  var ICON_PAUSE = '<path d="M3 2h4v12H3zM9 2h4v12H9z"/>';
+  var baseTime = null;
+  var dragging = false;
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function fmtClock(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    return pad(Math.floor(s / 60)) + ":" + pad(s % 60);
+  }
+  // Same burned-in format as the in-game HUD: YYYY-MM-DD T HH:MM:SS Z
+  function fmtStamp(d) {
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
+      " T " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + " Z";
+  }
+
+  function showState(text, busy) {
+    state.classList.remove("hidden");
+    $("stateText").textContent = text;
+    $("spinner").style.display = busy ? "" : "none";
+  }
+  function hideState() { state.classList.add("hidden"); }
+
+  // Watermark clock = start time + current playback position, like real footage.
+  function updateWatermark() {
+    if (!baseTime) return;
+    $("liveStamp").textContent = fmtStamp(new Date(baseTime.getTime() + (video.currentTime || 0) * 1000));
+  }
+
+  // Public API bridge.
+  window.loadBodycamVideo = function (videoUrl, officerName, dateStr) {
+    $("officer").textContent = String(officerName || "UNKNOWN").toUpperCase();
+    var d = new Date(dateStr);
+    baseTime = isNaN(d.getTime()) ? new Date() : d;
+    $("stamp").textContent = fmtStamp(baseTime);
+    updateWatermark();
+    showState("Loading evidence…", true);
+    video.src = videoUrl;
+    video.load();
+  };
+
+  // Remote pages can't call mta.triggerEvent, so closing is signalled by
+  // navigating to ?action=close — Lua sees it in onClientBrowserNavigate.
+  function closeViewer() {
+    location.href = location.origin + location.pathname + "?action=close";
+  }
+
+  function togglePlay() {
+    if (!video.currentSrc) return;
+    if (video.paused) {
+      var p = video.play();
+      if (p && p.catch) p.catch(function () {});
+    } else {
+      video.pause();
+    }
+  }
+
+  $("play").addEventListener("click", togglePlay);
+  video.addEventListener("click", togglePlay);
+  $("close").addEventListener("click", closeViewer);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { closeViewer(); }
+    else if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  });
+
+  video.addEventListener("play", function () { $("icon").innerHTML = ICON_PAUSE; });
+  video.addEventListener("pause", function () { $("icon").innerHTML = ICON_PLAY; });
+  video.addEventListener("waiting", function () { showState("Buffering…", true); });
+  video.addEventListener("playing", hideState);
+  video.addEventListener("canplay", function () { if (video.paused) hideState(); });
+  video.addEventListener("loadedmetadata", function () { $("dur").textContent = fmtClock(video.duration); });
+  video.addEventListener("timeupdate", function () {
+    $("cur").textContent = fmtClock(video.currentTime);
+    updateWatermark();
+    if (!dragging && video.duration) {
+      var p = video.currentTime / video.duration * 1000;
+      seek.value = p;
+      seek.style.setProperty("--p", (p / 10) + "%");
+    }
+  });
+  video.addEventListener("error", function () {
+    showState("Unable to play this video. Use a direct link to the video file itself " +
+      "(not a sharing page). WebM (VP8/VP9) is the most reliable format in MTA.", false);
+  });
+
+  seek.addEventListener("input", function () {
+    dragging = true;
+    seek.style.setProperty("--p", (seek.value / 10) + "%");
+  });
+  seek.addEventListener("change", function () {
+    if (video.duration) video.currentTime = seek.value / 1000 * video.duration;
+    dragging = false;
+  });
+
+  var q = new URLSearchParams(location.search);
+  if (q.get("action") === "close") return; // Lua is tearing the browser down
+  $("caseId").textContent = q.get("case") || "—";
+  $("badge").textContent = "#" + String(q.get("badge") || "N/A").toUpperCase();
+  $("serial").textContent = q.get("serial") || "AXON BODY 3 X81000000";
+
+  var src = q.get("v");
+  if (src) {
+    window.loadBodycamVideo(src, q.get("name"), q.get("date"));
+  } else {
+    showState("No evidence file specified.", false);
+  }
+})();
+</script>
+</body>
+</html>
